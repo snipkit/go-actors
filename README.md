@@ -1,8 +1,5 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/khulnasoft/goactors)](https://goreportcard.com/report/github.com/khulnasoft/goactors)
 ![example workflow](https://github.com/khulnasoft/goactors/actions/workflows/build.yml/badge.svg?branch=master)
-<a href="https://discord.gg/gdwXmXYNTh">
-	<img src="https://discordapp.com/api/guilds/1025692014903316490/widget.png?style=shield" alt="Discord Shield"/>
-</a>
 
 # Blazingly fast, low latency actors for Golang
 
@@ -300,19 +297,6 @@ events fulfill the `actor.LogEvent` interface. See the Eventstream section above
 ```
 make test
 ```
-
-# Community and discussions
-Join our Discord community with over 2000 members for questions and a nice chat.
-<br>
-<a href="https://discord.gg/gdwXmXYNTh">
-	<img src="https://discordapp.com/api/guilds/1025692014903316490/widget.png?style=banner2" alt="Discord Banner"/>
-</a>
-
-# Used in Production By
-
-This project is currently used in production by the following organizations/projects:
-
-- [Sensora IoT](https://sensora.io)
 
 # License
 
