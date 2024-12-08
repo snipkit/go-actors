@@ -1,0 +1,11 @@
+bin
+TODO.txt
+TODO
+_test
+/.vscode
+/.idea
+.DS_Store
+/_bench.test
+/cpu.prof
+/mem.prof
+temp
