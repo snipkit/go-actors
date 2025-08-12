@@ -9,6 +9,7 @@ import (
 	"golang.org/x/exp/maps"
 )
 
+// Internal cluster messages
 type (
 	activate struct {
 		kind   string
@@ -23,23 +24,22 @@ type (
 	}
 )
 
-// Agent is an actor/receiver that is responsible for managing the state
-// of the cluster.
+// Agent manages the state and membership of the cluster.
 type Agent struct {
 	members    *MemberSet
 	cluster    *Cluster
 	kinds      map[string]bool
 	localKinds map[string]kind
-	// All the actors that are available cluster wide.
-	activated map[string]*actor.PID
+	activated  map[string]*actor.PID // cluster-wide activated actors
 }
 
+// NewAgent returns a producer that creates a new Agent actor.
 func NewAgent(c *Cluster) actor.Producer {
 	kinds := make(map[string]bool)
 	localKinds := make(map[string]kind)
-	for _, kind := range c.kinds {
-		kinds[kind.name] = true
-		localKinds[kind.name] = kind
+	for _, k := range c.kinds {
+		kinds[k.name] = true
+		localKinds[k.name] = k
 	}
 	return func() actor.Receiver {
 		return &Agent{
@@ -52,10 +52,13 @@ func NewAgent(c *Cluster) actor.Producer {
 	}
 }
 
+// Receive handles all messages sent to the Agent actor.
 func (a *Agent) Receive(c *actor.Context) {
 	switch msg := c.Message().(type) {
 	case actor.Started:
+		// Optionally log startup or do initialization here.
 	case actor.Stopped:
+		// Optionally log shutdown or do cleanup here.
 	case *ActorTopology:
 		a.handleActorTopology(msg)
 	case *Members:
@@ -75,32 +78,22 @@ func (a *Agent) Receive(c *actor.Context) {
 	case getMembers:
 		c.Respond(a.members.Slice())
 	case getKinds:
-		kinds := make([]string, len(a.kinds))
-		i := 0
-		for kind := range a.kinds {
-			kinds[i] = kind
-			i++
-		}
-		c.Respond(kinds)
+		c.Respond(maps.Keys(a.kinds))
 	case getActive:
 		a.handleGetActive(c, msg)
 	}
 }
 
+// handleGetActive responds with activated actor(s) by id or kind.
 func (a *Agent) handleGetActive(c *actor.Context, msg getActive) {
-	if len(msg.id) > 0 {
-		pid := a.activated[msg.id]
-		c.Respond(pid)
+	if msg.id != "" {
+		c.Respond(a.activated[msg.id])
+		return
 	}
-	if len(msg.kind) > 0 {
-		pids := make([]*actor.PID, 0)
+	if msg.kind != "" {
+		var pids []*actor.PID
 		for id, pid := range a.activated {
-			parts := strings.Split(id, "/")
-			if len(parts) != 2 {
-				continue
-			}
-			kind := parts[0]
-			if msg.kind == kind {
+			if parts := strings.Split(id, "/"); len(parts) == 2 && parts[0] == msg.kind {
 				pids = append(pids, pid)
 			}
 		}
@@ -108,98 +101,85 @@ func (a *Agent) handleGetActive(c *actor.Context, msg getActive) {
 	}
 }
 
+// handleActorTopology adds activated actors from topology update.
 func (a *Agent) handleActorTopology(msg *ActorTopology) {
-	for _, actorInfo := range msg.Actors {
-		a.addActivated(actorInfo.PID)
+	for _, info := range msg.Actors {
+		a.addActivated(info.PID)
 	}
 }
 
+// handleDeactivation removes actor and broadcasts event.
 func (a *Agent) handleDeactivation(msg *Deactivation) {
 	a.removeActivated(msg.PID)
 	a.cluster.engine.Poison(msg.PID)
 	a.cluster.engine.BroadcastEvent(DeactivationEvent{PID: msg.PID})
 }
 
-// A new kind is activated on this cluster.
+// handleActivation adds actor and broadcasts event.
 func (a *Agent) handleActivation(msg *Activation) {
 	a.addActivated(msg.PID)
 	a.cluster.engine.BroadcastEvent(ActivationEvent{PID: msg.PID})
 }
 
+// handleActivationRequest spawns actor if kind exists locally.
 func (a *Agent) handleActivationRequest(msg *ActivationRequest) *ActivationResponse {
 	if !a.hasKindLocal(msg.Kind) {
-		slog.Error("received activation request but kind not registered locally on this node", "kind", msg.Kind)
+		slog.Error("activation request: kind not registered locally", "kind", msg.Kind)
 		return &ActivationResponse{Success: false}
 	}
-
 	kind := a.localKinds[msg.Kind]
 	pid := a.cluster.engine.Spawn(kind.producer, msg.Kind, actor.WithID(msg.ID))
-	resp := &ActivationResponse{
-		PID:     pid,
-		Success: true,
-	}
-	return resp
+	return &ActivationResponse{PID: pid, Success: true}
 }
 
+// activate starts an actor on the correct member and broadcasts activation.
 func (a *Agent) activate(kind string, config ActivationConfig) *actor.PID {
-	// Make sure actors are unique across the whole cluster.
-	id := kind + "/" + config.id // the id part of the PID
-	if _, ok := a.activated[id]; ok {
-		slog.Warn("activation failed", "err", "duplicated actor id across the cluster", "id", id)
+	id := kind + "/" + config.id
+	if _, exists := a.activated[id]; exists {
+		slog.Warn("duplicate actor id across cluster", "id", id)
 		return nil
 	}
 	members := a.members.FilterByKind(kind)
 	if len(members) == 0 {
-		slog.Warn("could not find any members with kind", "kind", kind)
+		slog.Warn("no members with kind found", "kind", kind)
 		return nil
 	}
 	if config.selectMember == nil {
 		config.selectMember = SelectRandomMember
 	}
-	memberPID := config.selectMember(ActivationDetails{
+	member := config.selectMember(ActivationDetails{
 		Members: members,
 		Region:  config.region,
 		Kind:    kind,
 	})
-	if memberPID == nil {
-		slog.Warn("activator did not found a member to activate on")
+	if member == nil {
+		slog.Warn("no member selected for activation")
 		return nil
 	}
 	req := &ActivationRequest{Kind: kind, ID: config.id}
-	activatorPID := actor.NewPID(memberPID.Host, "cluster/"+memberPID.ID)
+	activatorPID := actor.NewPID(member.Host, "cluster/"+member.ID)
 
-	var activationResp *ActivationResponse
-	// Local activation
-	if memberPID.Host == a.cluster.engine.Address() {
-		activationResp = a.handleActivationRequest(req)
+	var resp *ActivationResponse
+	if member.Host == a.cluster.engine.Address() {
+		resp = a.handleActivationRequest(req)
 	} else {
-		// Remote activation
-		//
-		// TODO: topology hash
-		resp, err := a.cluster.engine.Request(activatorPID, req, a.cluster.config.requestTimeout).Result()
+		result, err := a.cluster.engine.Request(activatorPID, req, a.cluster.config.requestTimeout).Result()
 		if err != nil {
-			slog.Error("failed activation request", "err", err)
+			slog.Error("activation request failed", "err", err)
 			return nil
 		}
-		r, ok := resp.(*ActivationResponse)
-		if !ok {
-			slog.Error("expected *ActivationResponse", "msg", reflect.TypeOf(resp))
+		r, ok := result.(*ActivationResponse)
+		if !ok || !r.Success {
+			slog.Error("activation unsuccessful", "response", r)
 			return nil
 		}
-		if !r.Success {
-			slog.Error("activation unsuccessful", "msg", r)
-			return nil
-		}
-		activationResp = r
+		resp = r
 	}
-
-	a.bcast(&Activation{
-		PID: activationResp.PID,
-	})
-
-	return activationResp.PID
+	a.bcast(&Activation{PID: resp.PID})
+	return resp.PID
 }
 
+// handleMembers updates cluster membership and broadcasts changes.
 func (a *Agent) handleMembers(members []*Member) {
 	joined := NewMemberSet(members...).Except(a.members.Slice())
 	left := a.members.Except(members)
@@ -212,53 +192,37 @@ func (a *Agent) handleMembers(members []*Member) {
 	}
 }
 
+// memberJoin adds member and broadcasts join event and topology.
 func (a *Agent) memberJoin(member *Member) {
 	a.members.Add(member)
-
-	// track cluster wide available kinds
 	for _, kind := range member.Kinds {
-		if _, ok := a.kinds[kind]; !ok {
-			a.kinds[kind] = true
-		}
+		a.kinds[kind] = true
 	}
-
-	actorInfos := make([]*ActorInfo, 0)
+	actorInfos := make([]*ActorInfo, 0, len(a.activated))
 	for _, pid := range a.activated {
-		actorInfo := &ActorInfo{
-			PID: pid,
-		}
-		actorInfos = append(actorInfos, actorInfo)
+		actorInfos = append(actorInfos, &ActorInfo{PID: pid})
 	}
-
-	// Send our ActorTopology to this member
 	if len(actorInfos) > 0 {
 		a.cluster.engine.Send(member.PID(), &ActorTopology{Actors: actorInfos})
 	}
-
-	// Broadcast MemberJoinEvent
-	a.cluster.engine.BroadcastEvent(MemberJoinEvent{
-		Member: member,
-	})
-
+	a.cluster.engine.BroadcastEvent(MemberJoinEvent{Member: member})
 	slog.Debug("[CLUSTER] member joined", "id", member.ID, "host", member.Host, "kinds", member.Kinds, "region", member.Region)
 }
 
+// memberLeave removes member and updates available kinds.
 func (a *Agent) memberLeave(member *Member) {
 	a.members.Remove(member)
 	a.rebuildKinds()
-
-	// Remove all the activeKinds that where running on the member that left the cluster.
 	for _, pid := range a.activated {
 		if pid.Address == member.Host {
 			a.removeActivated(pid)
 		}
 	}
-
 	a.cluster.engine.BroadcastEvent(MemberLeaveEvent{Member: member})
-
 	slog.Debug("[CLUSTER] member left", "id", member.ID, "host", member.Host, "kinds", member.Kinds)
 }
 
+// bcast sends a message to all members of the cluster.
 func (a *Agent) bcast(msg any) {
 	a.members.ForEach(func(member *Member) bool {
 		a.cluster.engine.Send(member.PID(), msg)
@@ -266,30 +230,32 @@ func (a *Agent) bcast(msg any) {
 	})
 }
 
+// addActivated tracks a new activated actor.
 func (a *Agent) addActivated(pid *actor.PID) {
-	if _, ok := a.activated[pid.ID]; !ok {
+	if _, exists := a.activated[pid.ID]; !exists {
 		a.activated[pid.ID] = pid
-		slog.Debug("new actor available on cluster", "pid", pid)
+		slog.Debug("actor activated on cluster", "pid", pid)
 	}
 }
 
+// removeActivated stops tracking an actor.
 func (a *Agent) removeActivated(pid *actor.PID) {
 	delete(a.activated, pid.ID)
 	slog.Debug("actor removed from cluster", "pid", pid)
 }
 
+// hasKindLocal returns true if the kind is available locally.
 func (a *Agent) hasKindLocal(name string) bool {
-	_, ok := a.localKinds[name]
-	return ok
+	_, exists := a.localKinds[name]
+	return exists
 }
 
+// rebuildKinds updates the global kinds map after membership changes.
 func (a *Agent) rebuildKinds() {
 	maps.Clear(a.kinds)
 	a.members.ForEach(func(m *Member) bool {
 		for _, kind := range m.Kinds {
-			if _, ok := a.kinds[kind]; !ok {
-				a.kinds[kind] = true
-			}
+			a.kinds[kind] = true
 		}
 		return true
 	})
