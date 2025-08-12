@@ -1,67 +1,68 @@
 package cluster
 
 import (
-	fmt "fmt"
 	"math"
 	"math/rand"
+	"strconv"
 )
 
-// ActivationConfig...
+const (
+	DefaultRegion = "default"
+)
+
+// SelectMemberFunc is invoked during the activation process.
+// Given ActivationDetails, it returns the member on which the actor will be spawned.
+type SelectMemberFunc func(ActivationDetails) *Member
+
+// ActivationConfig contains configuration for actor activation in the cluster.
 type ActivationConfig struct {
 	id           string
 	region       string
 	selectMember SelectMemberFunc
 }
 
-// NewActivationConfig returns a new default config.
-func NewActivationConfig() ActivationConfig {
-	return ActivationConfig{
-		id:           fmt.Sprintf("%d", rand.Intn(math.MaxInt)),
-		region:       "default",
+// NewActivationConfig returns a new ActivationConfig with default values.
+func NewActivationConfig() *ActivationConfig {
+	return &ActivationConfig{
+		id:           strconv.Itoa(rand.Intn(math.MaxInt)),
+		region:       DefaultRegion,
 		selectMember: SelectRandomMember,
 	}
 }
 
-// WithSelectMemberFunc set's the fuction that will be invoked during
-// the activation process.
-// It will select the member where the actor will be activated/spawned on.
-func (config ActivationConfig) WithSelectMemberFunc(fun SelectMemberFunc) ActivationConfig {
-	config.selectMember = fun
-	return config
+// WithSelectMemberFunc sets the function to select the member during activation.
+// Returns the updated ActivationConfig for chaining.
+func (c *ActivationConfig) WithSelectMemberFunc(fn SelectMemberFunc) *ActivationConfig {
+	c.selectMember = fn
+	return c
 }
 
-// WithID set's the id of the actor that will be activated on the cluster.
-//
-// Defaults to a random identifier.
-func (config ActivationConfig) WithID(id string) ActivationConfig {
-	config.id = id
-	return config
+// WithID sets the actor ID to be activated in the cluster.
+// Defaults to a random identifier if not set.
+func (c *ActivationConfig) WithID(id string) *ActivationConfig {
+	c.id = id
+	return c
 }
 
-// WithRegion set's the region on where this actor should be spawned.
-//
-// Defaults to a "default".
-func (config ActivationConfig) WithRegion(region string) ActivationConfig {
-	config.region = region
-	return config
+// WithRegion sets the region where the actor should be spawned.
+// Defaults to "default" if not set.
+func (c *ActivationConfig) WithRegion(region string) *ActivationConfig {
+	c.region = region
+	return c
 }
 
-// SelectMemberFunc will be invoked during the activation process.
-// Given the ActivationDetails the actor will be spawned on the returned member.
-type SelectMemberFunc func(ActivationDetails) *Member
-
-// ActivationDetails holds detailed information about an activation.
+// ActivationDetails provides information needed to select a cluster member for activation.
 type ActivationDetails struct {
-	// Region where the actor should be activated on
-	Region string
-	// A slice of members that are pre-filtered by the kind of the actor
-	// that need to be activated
-	Members []*Member
-	// The kind of the actor
-	Kind string
+	Region  string    // Region for actor activation
+	Members []*Member // Pre-filtered cluster members by actor kind
+	Kind    string    // Kind of the actor
 }
 
-// SelectRandomMember selects a random member of the cluster.
+// SelectRandomMember randomly selects a member from the available cluster members.
+// Returns nil if the Members slice is empty.
 func SelectRandomMember(details ActivationDetails) *Member {
+	if len(details.Members) == 0 {
+		return nil
+	}
 	return details.Members[rand.Intn(len(details.Members))]
 }
